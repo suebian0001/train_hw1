@@ -9,6 +9,8 @@ from torch.utils.data import DataLoader, Dataset, Subset
 from sklearn.model_selection import train_test_split
 from tqdm.auto import tqdm
 import random
+import torchvision.models as models
+
 
 # Set the experiment name
 _exp_name = "sample"
@@ -25,6 +27,10 @@ if torch.cuda.is_available():
 # Image transformations for training and testing
 train_tfm = transforms.Compose([
     transforms.Resize((128, 128)),
+    transforms.RandomHorizontalFlip(),
+    transforms.RandomRotation(15),
+    transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),
+    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
     transforms.ToTensor(),
 ])
 
@@ -43,7 +49,7 @@ class FoodDataset(Dataset):
         self.files = sorted([os.path.join(path, x) for x in os.listdir(path) if x.endswith(".jpg")])
         if files is not None:
             self.files = files
-        print(f"One {path} sample:", self.files[0])
+        # print(f"One {path} sample:", self.files[0])
         self.transform = tfm
 
     def __len__(self):
@@ -60,7 +66,7 @@ class FoodDataset(Dataset):
             im = self.transform(im)
 
             try:
-                label = int(os.path.basename(fname).split("_")[0])
+                label = int(os.path.basename(fname).split("_")[0])  # 假設標籤在文件名中
             except ValueError:
                 label = -1
         except OSError:
@@ -82,29 +88,13 @@ class FoodDataset(Dataset):
 class Classifier(nn.Module):
     def __init__(self):
         super(Classifier, self).__init__()
-        # Define convolutional layers
-        self.conv_layers = nn.Sequential(
-            nn.Conv2d(3, 16, kernel_size=3, padding=1),  # 3 input channels (RGB), 16 output channels
-            nn.ReLU(),
-            nn.MaxPool2d(2, 2),
-            nn.Conv2d(16, 32, kernel_size=3, padding=1),  # 16 input channels, 32 output channels
-            nn.ReLU(),
-            nn.MaxPool2d(2, 2)
-        )
-
-        num_classes = 11
-        # Define fully connected layers
-        self.fc_layers = nn.Sequential(
-            nn.Linear(32 * 32 * 32, 256),  # Adjust the input size based on the image dimensions
-            nn.ReLU(),
-            nn.Linear(256, num_classes)  # Assuming 10 output classes
-        )
+        # 使用 ResNet18 預訓練模型
+        self.model = models.resnet18(pretrained=True)
+        num_ftrs = self.model.fc.in_features
+        self.model.fc = nn.Linear(num_ftrs, 11)  # 最後的全連接層，輸出11個類別
     
     def forward(self, x):
-        x = self.conv_layers(x)  # Pass input through the conv layers
-        x = x.view(x.size(0), -1)  # Flatten the tensor before passing to fully connected layers
-        x = self.fc_layers(x)  # Pass through the fc layers
-        return x
+        return self.model(x)
 
 # Set device for model training/inference
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -124,7 +114,8 @@ test_loader = DataLoader(test_set, batch_size=32, shuffle=False)
 # update 1st
 model = Classifier().to(device)
 criterion = nn.CrossEntropyLoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+optimizer = torch.optim.AdamW(model.parameters(), lr=0.001)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3)
 
 # print the model architecture
 # print(model)  
@@ -143,6 +134,7 @@ optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
 # 訓練模型 1st
 num_epochs = 10
+best_loss = float('inf')
 for epoch in range(num_epochs):
     model.train()
     running_loss = 0.0
@@ -157,10 +149,14 @@ for epoch in range(num_epochs):
 
         running_loss += loss.item()
 
-    print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {running_loss/len(train_loader):.4f}")
+    epoch_loss = running_loss / len(train_loader)
+    print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {epoch_loss:.4f}")
 
+    scheduler.step(epoch_loss)
 # 儲存最佳模型
-torch.save(model.state_dict(), f"{_exp_name}_best.ckpt")
+if epoch_loss < best_loss:
+        best_loss = epoch_loss
+        torch.save(model.state_dict(), f"{_exp_name}_best.ckpt")
 
 # 評估模型
 model.eval()
